@@ -1,7 +1,7 @@
 /*   
- * GarHAge
+ * GarHAge2.0
  * a Home-Automation-friendly ESP8266-based MQTT Garage Door Controller
- * Licensed under the MIT License, Copyright (c) 2017 marthoc
+ * Licensed under the MIT License, Copyright (c) 2020 reagans
 */
 
 #include <ESP8266WiFi.h>
@@ -11,7 +11,9 @@
 #include <ArduinoOTA.h>
 #include <ArduinoJson.h>
 #include <DHT.h>
+#include <Adafruit_BME280.h>
 #include <Adafruit_Sensor.h>
+#include <Wire.h>
 #include "config.h"
 
 const char* garhageVersion = "2.0.0";
@@ -75,11 +77,19 @@ const int aux_door2_statusPin = AUX_DOOR2_STATUS_PIN;
 const char* aux_door2_statusSwitchLogic = AUX_DOOR2_STATUS_SWITCH_LOGIC;
 
 const boolean dht_enabled = DHT_ENABLED;
-const char* dhtTempTopic = MQTT_TEMPERATURE_TOPIC;
-const char* dhtHumTopic = MQTT_HUMIDITY_TOPIC;
+const char* dhtTempTopic = DHT_MQTT_TEMPERATURE_TOPIC;
+const char* dhtHumTopic = DHT_MQTT_HUMIDITY_TOPIC;
 
 const unsigned long dht_publish_interval_s = DHT_PUBLISH_INTERVAL;
 unsigned long dht_lastReadTime = 0;
+
+const boolean bme_enabled = BME_ENABLED;
+const char* bmeTempTopic = BME_MQTT_TEMPERATURE_TOPIC;
+const char* bmeHumTopic = BME_MQTT_HUMIDITY_TOPIC;
+const char* bmePressTopic = BME_MQTT_PRESSURE_TOPIC;
+
+const unsigned long bme_publish_interval_s = BME_PUBLISH_INTERVAL;
+unsigned long bme_lastReadTime = 0;
 
 const int relayActiveTime = 500;
 int door1_lastStatusValue;
@@ -119,6 +129,7 @@ const char* apiTopic = apiTopicStr.c_str();
 WiFiClient espClient;
 PubSubClient client(espClient);
 DHT dht(DHTPIN, DHTTYPE);
+Adafruit_BME280 bme; //I2C
 
 // Wifi setup function
 
@@ -505,6 +516,7 @@ void publish_enabled_doors() {
 // STATE_ALL - publishes the current state of all enabled devices (including temp/humidity)
 // STATE_DOORS - publishes the current state of all doors only
 // STATE_DHT - forces a read/publish of temp/humidity
+// STATE_BME - forces a read/publish of temp/humidity/pressure
 // DISCOVERY - publishes HA discovery payloads for all enabled devices
 void processAPIMessage(String payload) {
   if (payload == "STATE_ALL") {
@@ -512,6 +524,8 @@ void processAPIMessage(String payload) {
     publish_birth_message();
     publish_enabled_doors();
     if (dht_enabled) { dht_read_publish(); 
+    }
+    if (bme_enabled) { bme_read_publish();
     }
   }
 
@@ -526,10 +540,19 @@ void processAPIMessage(String payload) {
       Serial.println("API Request: STATE_DHT - Forcing Temperature and Humidity read/publish...");
       publish_birth_message();
       dht_read_publish(); 
-      }
+    }
     else Serial.println("API Request ERROR: STATE_DHT requested but DHT is not enabled!");
   }
 
+  else if (payload == "STATE_BME") {
+    if (bme_enabled) {
+      Serial.println("API Request: STATE_BME - Forcing Temperature, Humidity, and Pressure read/publish...");
+      publish_birth_message();
+      bme_read_publish();
+    }
+    else Serial.println("API Request ERROR: STATE_BME requested but BME is not enabled!");
+  }
+  
   else if (payload == "DISCOVERY") {
     if (discoveryEnabled) {
       Serial.println("API Request: DISCOVERY - Publishing Home Assistant MQTT Discovery payloads...");
@@ -697,6 +720,59 @@ void dht_read_publish() {
 
 }
 
+void bme_read_publish() {
+  // Read values from sensor
+  float hum = bme.readHumidity();
+  float tempRaw = bme.readTemperature();
+  float pressure = (bme.readPressure() / 100.0F);
+
+  // Check if there was an error reading values
+  if (isnan(hum) || isnan(tempRaw) || isnan(pressure)) {
+    Serial.print("Failed to read from BME sensor; will try again in ");
+    Serial.print(bme_publish_interval_s);
+    Serial.println(" seconds...");
+    return;
+  }
+
+  boolean celsius = BME_TEMPERATURE_CELSIUS;
+  float temp;
+  if (celsius) {
+    temp = tempRaw;
+  }
+  else {
+    temp = (tempRaw * 1.8 + 32);
+  }
+
+  char payload[4];
+
+  //Publish the temperature payload via MQTT
+  dtostrf(temp, 4, 0, payload);
+  Serial.print("Publishing BME Temperature payload: ");
+  Serial.print(payload);
+  Serial.print(" to ");
+  Serial.print(bmeTempTopic);
+  Serial.println("...");
+  client.publish(bmeTempTopic, payload, false);
+
+  // Publish the humidity payload via MQTT
+  dtostrf(hum, 4, 0, payload);
+  Serial.print("Publishing BME humidity payload: ");
+  Serial.print(payload);
+  Serial.print(" to ");
+  Serial.print(bmeHumTopic);
+  Serial.println("...");
+  client.publish(bmeHumTopic, payload, false);
+
+  dtostrf(pressure, 4, 0, payload);
+  Serial.print("Publishing BME Pressure payload: ");
+  Serial.print(payload);
+  Serial.print(" to ");
+  Serial.print(bmePressTopic);
+  Serial.println("...");
+  client.publish(bmePressTopic, payload, false);
+
+}
+
 void publish_ha_mqtt_discovery() {
   Serial.println("Publishing Home Assistant MQTT Discovery payloads...");
   publish_ha_mqtt_discovery_door1();
@@ -710,16 +786,21 @@ void publish_ha_mqtt_discovery() {
     publish_ha_mqtt_discovery_auxdoor2();
   }
   if (dht_enabled) {
-    publish_ha_mqtt_discovery_temperature();
-    publish_ha_mqtt_discovery_humidity();
+    publish_ha_mqtt_discovery_dht_temperature();
+    publish_ha_mqtt_discovery_dht_humidity();
+  }
+  if (bme_enabled) {
+    publish_ha_mqtt_discovery_bme_temperature();
+    publish_ha_mqtt_discovery_bme_humidity();
+    publish_ha_mqtt_discovery_bme_pressure();
   }
 }
 
 void publish_ha_mqtt_discovery_door1() {
   const size_t bufferSize = JSON_OBJECT_SIZE(13);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  DynamicJsonDocument doc(bufferSize);
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.to<JsonObject>();
   root["name"] = door1_alias;
   root["command_topic"] = mqtt_door1_action_topic;
   root["payload_open"] = "OPEN";
@@ -736,7 +817,7 @@ void publish_ha_mqtt_discovery_door1() {
 
   // Prepare payload for publishing
   String payloadStr = "";
-  root.printTo(payloadStr);
+  serializeJson(root, payloadStr);
   const char* payload = payloadStr.c_str();
 
   // Prepare topic for publishing
@@ -755,9 +836,9 @@ void publish_ha_mqtt_discovery_door1() {
 
 void publish_ha_mqtt_discovery_door2() {
   const size_t bufferSize = JSON_OBJECT_SIZE(13);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  DynamicJsonDocument doc(bufferSize);
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.to<JsonObject>();
   root["name"] = door2_alias;
   root["command_topic"] = mqtt_door2_action_topic;
   root["payload_open"] = "OPEN";
@@ -774,7 +855,7 @@ void publish_ha_mqtt_discovery_door2() {
 
   // Prepare payload for publishing
   String payloadStr = "";
-  root.printTo(payloadStr);
+  serializeJson(root, payloadStr);
   const char* payload = payloadStr.c_str();
 
   // Prepare topic for publishing
@@ -793,9 +874,9 @@ void publish_ha_mqtt_discovery_door2() {
 
 void publish_ha_mqtt_discovery_auxdoor1() {
   const size_t bufferSize = JSON_OBJECT_SIZE(9);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  DynamicJsonDocument doc(bufferSize);
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.to<JsonObject>();
   root["name"] = aux_door1_alias;
   root["state_topic"] = mqtt_aux_door1_status_topic;
   root["payload_on"] = "open";
@@ -808,7 +889,7 @@ void publish_ha_mqtt_discovery_auxdoor1() {
 
   // Prepare payload for publishing
   String payloadStr = "";
-  root.printTo(payloadStr);
+  serializeJson(root, payloadStr);
   const char* payload = payloadStr.c_str();
 
   // Prepare topic for publishing
@@ -827,9 +908,9 @@ void publish_ha_mqtt_discovery_auxdoor1() {
 
 void publish_ha_mqtt_discovery_auxdoor2() {
   const size_t bufferSize = JSON_OBJECT_SIZE(9);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  DynamicJsonDocument doc(bufferSize);
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.to<JsonObject>();
   root["name"] = aux_door2_alias;
   root["state_topic"] = mqtt_aux_door2_status_topic;
   root["payload_on"] = "open";
@@ -842,7 +923,7 @@ void publish_ha_mqtt_discovery_auxdoor2() {
 
   // Prepare payload for publishing
   String payloadStr = "";
-  root.printTo(payloadStr);
+  serializeJson(root, payloadStr);
   const char* payload = payloadStr.c_str();
 
   // Prepare topic for publishing
@@ -859,9 +940,9 @@ void publish_ha_mqtt_discovery_auxdoor2() {
 
 }
 
-void publish_ha_mqtt_discovery_temperature() {
+void publish_ha_mqtt_discovery_dht_temperature() {
   const size_t bufferSize = JSON_OBJECT_SIZE(7);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  DynamicJsonDocument doc(bufferSize);
 
   boolean celsius = DHT_TEMPERATURE_CELSIUS;
   String uom = "";
@@ -874,7 +955,7 @@ void publish_ha_mqtt_discovery_temperature() {
 
   String alias = DHT_TEMPERATURE_ALIAS;
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.to<JsonObject>();
   root["name"] = alias;
   root["state_topic"] = dhtTempTopic;
   root["unit_of_measurement"] = uom;
@@ -885,7 +966,7 @@ void publish_ha_mqtt_discovery_temperature() {
 
   // Prepare payload for publishing
   String payloadStr = "";
-  root.printTo(payloadStr);
+  serializeJson(root, payloadStr);
   const char* payload = payloadStr.c_str();
 
   // Prepare topic for publishing
@@ -902,13 +983,13 @@ void publish_ha_mqtt_discovery_temperature() {
 
 }
 
-void publish_ha_mqtt_discovery_humidity() {
+void publish_ha_mqtt_discovery_dht_humidity() {
   const size_t bufferSize = JSON_OBJECT_SIZE(7);
-  DynamicJsonBuffer jsonBuffer(bufferSize);
+  DynamicJsonDocument doc(bufferSize);
 
   String alias = DHT_HUMIDITY_ALIAS;
 
-  JsonObject& root = jsonBuffer.createObject();
+  JsonObject root = doc.to<JsonObject>();
   root["name"] = alias;
   root["state_topic"] = dhtHumTopic;
   root["unit_of_measurement"] = "%";
@@ -919,7 +1000,7 @@ void publish_ha_mqtt_discovery_humidity() {
 
   // Prepare payload for publishing
   String payloadStr = "";
-  root.printTo(payloadStr);
+  serializeJson(root, payloadStr);
   const char* payload = payloadStr.c_str();
 
   // Prepare topic for publishing
@@ -933,7 +1014,115 @@ void publish_ha_mqtt_discovery_humidity() {
   Serial.print(alias);
   Serial.println("...");
   client.publish(topic, payload, false);
+}
+  
+void publish_ha_mqtt_discovery_bme_temperature() {
+  const size_t bufferSize = JSON_OBJECT_SIZE(7);
+  DynamicJsonDocument doc(bufferSize);
 
+  boolean celsius = BME_TEMPERATURE_CELSIUS;
+  String uom = "";
+  if (celsius) {
+    uom = "°C";
+  }
+  else {
+    uom = "°F";
+  }
+
+  String alias = BME_TEMPERATURE_ALIAS;
+
+  JsonObject root = doc.to<JsonObject>();
+  root["name"] = alias;
+  root["state_topic"] = bmeTempTopic;
+  root["unit_of_measurement"] = uom;
+  root["availability_topic"] = availabilityTopic;
+  root["payload_available"] = "online";
+  root["payload_unavailable"] = "offline";
+  root["qos"] = 0;
+
+  // Prepare payload for publishing
+  String payloadStr = "";
+  serializeJson(root, payloadStr);
+  const char* payload = payloadStr.c_str();
+
+  // Prepare topic for publishing
+  String clientID = MQTT_CLIENTID;
+  String suffix = "/temperature/config";
+  String topicStr = discoveryPrefix + "/sensor/" + clientID + suffix;
+  const char* topic = topicStr.c_str();
+
+  // Publish payload
+  Serial.print("Publishing MQTT Discovery payload for ");
+  Serial.print(alias);
+  Serial.println("...");
+  client.publish(topic, payload, false);
+
+}
+
+void publish_ha_mqtt_discovery_bme_humidity() {
+  const size_t bufferSize = JSON_OBJECT_SIZE(7);
+  DynamicJsonDocument doc(bufferSize);
+
+  String alias = BME_HUMIDITY_ALIAS;
+
+  JsonObject root = doc.to<JsonObject>();
+  root["name"] = alias;
+  root["state_topic"] = bmeHumTopic;
+  root["unit_of_measurement"] = "%";
+  root["availability_topic"] = availabilityTopic;
+  root["payload_available"] = "online";
+  root["payload_unavailable"] = "offline";
+  root["qos"] = 0;
+
+  // Prepare payload for publishing
+  String payloadStr = "";
+  serializeJson(root, payloadStr);
+  const char* payload = payloadStr.c_str();
+
+  // Prepare topic for publishing
+  String clientID = MQTT_CLIENTID;
+  String suffix = "/humidity/config";
+  String topicStr = discoveryPrefix + "/sensor/" + clientID + suffix;
+  const char* topic = topicStr.c_str();
+
+  // Publish payload
+  Serial.print("Publishing MQTT Discovery payload for ");
+  Serial.print(alias);
+  Serial.println("...");
+  client.publish(topic, payload, false);
+}
+
+void publish_ha_mqtt_discovery_bme_pressure() {
+  const size_t bufferSize = JSON_OBJECT_SIZE(7);
+  DynamicJsonDocument doc(bufferSize);
+
+  String alias = BME_PRESSURE_ALIAS;
+
+  JsonObject root = doc.to<JsonObject>();
+  root["name"] = alias;
+  root["state_topic"] = bmePressTopic;
+  root["unit_of_measurement"] = "%";
+  root["availability_topic"] = availabilityTopic;
+  root["payload_available"] = "online";
+  root["payload_unavailable"] = "offline";
+  root["qos"] = 0;
+
+  // Prepare payload for publishing
+  String payloadStr = "";
+  serializeJson(root, payloadStr);
+  const char* payload = payloadStr.c_str();
+
+  // Prepare topic for publishing
+  String clientID = MQTT_CLIENTID;
+  String suffix = "/pressure/config";
+  String topicStr = discoveryPrefix + "/sensor/" + clientID + suffix;
+  const char* topic = topicStr.c_str();
+
+  // Publish payload
+  Serial.print("Publishing MQTT Discovery payload for ");
+  Serial.print(alias);
+  Serial.println("...");
+  client.publish(topic, payload, false);
 }
 
 // Function that serial prints the status of devices, for use in setup().
@@ -978,6 +1167,14 @@ void print_device_status() {
 
   Serial.print("DHT Sensor     : ");
   if (dht_enabled) {
+    Serial.println("Enabled");
+  }
+  else {
+    Serial.println("Disabled");
+  }
+
+  Serial.print("BME Sensor     : ");
+  if (bme_enabled) {
     Serial.println("Enabled");
   }
   else {
@@ -1052,6 +1249,12 @@ void reconnect() {
       if (dht_enabled) {
         dht_read_publish();
         dht_lastReadTime = millis();
+      }
+
+      // Publish the current temperature, humidity, and pressure readings
+      if (bme_enabled) {
+        bme_read_publish();
+        bme_lastReadTime = millis();
       }
 
     } 
@@ -1131,6 +1334,14 @@ void setup() {
   setup_wifi();
   setup_ota();
   if (dht_enabled) { dht.begin(); }
+  if (bme_enabled) {
+    bool status;
+    Wire.begin(BME_SDA,BME_SCL);
+    status = bme.begin(0x76);
+    if (!status) {
+      Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    }
+  }
   client.setServer(mqtt_broker, 1883);
   client.setCallback(callback);
 }
@@ -1164,5 +1375,13 @@ void loop() {
       dht_lastReadTime = millis();
     }
   }
-  
+
+  // Run BME function to read/publish if enabled and interval is OK
+  if (bme_enabled) {
+    unsigned long currentTime = millis();
+    if (currentTime - bme_lastReadTime > (bme_publish_interval_s * 1000)) {
+      bme_read_publish();
+      bme_lastReadTime = millis();
+    }
+  }
 }

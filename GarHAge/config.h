@@ -36,8 +36,8 @@
 #define DOOR1_ALIAS "Garage Door 1"
 #define MQTT_DOOR1_ACTION_TOPIC "garage/door/1/action"
 #define MQTT_DOOR1_STATUS_TOPIC "garage/door/1/status"
-#define DOOR1_OPEN_PIN D2
-#define DOOR1_CLOSE_PIN D2
+#define DOOR1_OPEN_PIN D1
+#define DOOR1_CLOSE_PIN D1
 #define DOOR1_STATUS_PIN D5
 #define DOOR1_STATUS_SWITCH_LOGIC "NO"
 
@@ -47,8 +47,8 @@
 #define DOOR2_ALIAS "Garage Door 2"
 #define MQTT_DOOR2_ACTION_TOPIC "garage/door/2/action"
 #define MQTT_DOOR2_STATUS_TOPIC "garage/door/2/status"
-#define DOOR2_OPEN_PIN D1
-#define DOOR2_CLOSE_PIN D1
+#define DOOR2_OPEN_PIN D2
+#define DOOR2_CLOSE_PIN D2
 #define DOOR2_STATUS_PIN D6
 #define DOOR2_STATUS_SWITCH_LOGIC "NO"
 
@@ -73,11 +73,24 @@
 // Temperature and Humidity Sensor Parameters
 
 #define DHT_ENABLED false
-#define DHTPIN D7
+#define DHTPIN D0
 #define DHTTYPE DHT11 // or: DHT21 or DHT22
-#define MQTT_TEMPERATURE_TOPIC "garage/temperature"
-#define MQTT_HUMIDITY_TOPIC "garage/humidity"
+#define DHT_MQTT_TEMPERATURE_TOPIC "garage/temperature"
+#define DHT_MQTT_HUMIDITY_TOPIC "garage/humidity"
 #define DHT_PUBLISH_INTERVAL 300
 #define DHT_TEMPERATURE_CELSIUS true
 #define DHT_TEMPERATURE_ALIAS "Garage Temperature"
 #define DHT_HUMIDITY_ALIAS "Garage Humidity"
+
+#define BME_ENABLED false
+#define BME_SCL D7
+#define BME_SDA D8
+#define BME_MQTT_TEMPERATURE_TOPIC "garage/temperature"
+#define BME_MQTT_HUMIDITY_TOPIC "garage/humidity"
+#define BME_MQTT_PRESSURE_TOPIC "garage/pressure"
+#define BME_PUBLISH_INTERVAL 300
+#define BME_TEMPERATURE_CELSIUS false
+#define BME_TEMPERATURE_ALIAS "Garage Temperature"
+#define BME_HUMIDITY_ALIAS "Garage Humidity"
+#define BME_PRESSURE_ALIAS "Garage Pressure"
+#define SEALEVELPRESSURE_HPA (1013.25)
